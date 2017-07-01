@@ -1,0 +1,483 @@
+Maru Documentation
+
+====== gc.c ======
+
+gc.c implements a mark-and-sweep garbage collector
+
+gc_header structure:
+	size	: size of chunk as a long
+	flags	: used, atom, mark
+			atom = the space does not hold an array of oops to also mark
+			!atom = the space holds an array of oops that must also be traversed during mark
+
+	next	: pointer to next gc_header
+	finalizers	: pointer to any finalizer functions for this chunk
+	APP_HEADER : header for app; for Maru this is a type word
+
+The gc_header comes before the chunk of memory it marks; an oop pointer points to the first word of chunk memory; it is moved
+back by the gc_header size to point to the header information (ptr2hdr)
+an oop with the lsb set is ignored in the mark phase (can be used to tag e.g. immediate integers)
+
+static gcbase is a fake header initalized to {0, {-1}, &gcbase}
+static gcheader *gcnext = &gcbase
+
+GC_malloc(bytes)
+	starting at gcnext, search for the first header which is not marked used.
+	if one is found, try to coalesce subsequent headers into a large block if they are not marked used and are contiguous memory (this
+	merges together blocks that have been split).
+	if block size found larger than bytes + another header, split the block into one that is bytes sized and the remaining, then insert
+	a new header for the remaining bytes.  Finally, set the used flag in the header, zero out the block, and return a pointer to it.
+
+	If the traversal returns back to the starting position (last entry in chain points to the first), we need to allocate new memory from the system.
+	new memory is allocated in the first power-of-2 size multiple of a base gcQuantum size (50KB) greater than the requested bytes, and is
+	inserted at the beginning of the gcbase chain (gcbase.next points to the new memory).  Then the alloc search is restarted.
+
+GC_malloc_atomic(bytes)
+	same as GC_malloc, but also sets the atomic flag in the header. (for non-pointer arrays)
+
+GC_realloc(ptr, bytes)
+	used to grow an existing structure in-place, if possible, otherwise it allocates a new chunk and returns the new pointer
+
+GC_freeheader(hdr)
+	set header flags to zero, freeing up the chunk
+
+GC_free(ptr)
+	frees the chunk pointed to by ptr by clearing the flags in its header
+
+GC_size(ptr)
+	returns the size of the chunk
+
+
+GC_mark_function(ptr)
+	pluggable function; default is to call GC_mark on all the fields in the chunk (if they don’t have the lsb set)
+
+GC_mark(ptr)
+	if not already marked:
+		set mark in header
+		if !atomic, call GC_mark_function(ptr)
+
+GC_mark_leaf(ptr)
+	set mark in header
+
+GC_sweep
+	traverse list starting at gcbase.next
+	if hdr->mark, set it to zero
+	else:
+		if finalizers, add finalizers in header to global finalizable chain
+		else zero out header
+
+	at the end, call each of the finalizer functions collected
+	{? can’t find where a block with finalizers gets its header flags cleared : bug?}
+
+GC roots
+	roots of the reachable memory tree are kept in the roots table, which grows by 2x (realloc) when full
+	GC_add_root  : add root at end
+	GC_delete_root : remove a root, moving all the following roots down by one
+
+GC_PROTECT : macro that creates a new GC_StackRoot and pushes it onto front of link list of SRs
+GC_UNPROTECT : macro that pops the top stack root (from linked list of SRs)
+
+GC_collect
+	run mark on all roots, then sweep
+
+GC_register_finalizer	: add a finalizer to an object; called when object is freed
+
+GC_save, GC_load	: save and load GC state to allow for persistent memory
+
+
+
+
+====== eval2.c ======
+
+Basic Object Types
+
+Data		Used for FFI interface (deprecated in eval2?)
+Long
+Double
+String
+Symbol	symbols are kept in a sorted array which is searched using a binary search, comparing on the name string
+		When a new symbol is interned, it is inserted into the symbol array
+Pair
+Array
+Expr		(closure) created from lambda, captures args and env
+
+Form		expanded and evaluated during the expand phase. Can expand in place of a function (define-form) or a symbol (define-constant)
+		arguments are passed in un-evaluated.  Used to define new syntax, macro-inlining
+		(form <function-to-expand-for-function> <function-to-expand-for-symbol>)
+
+Fixed		primitive subroutine without argument evaluation (wraps Subr)
+			if, and, or, set, let, while, quote, lambda, define
+
+Subr		primitive subroutine
+			ibinary		& | ^ << >>
+			binary		+ * / %
+			relation	< <= > >= = !=
+			logical		not (and, or are fixed subrs)
+			definition	form defined? fixed?
+			pair ops	cons car cdd set-car set-cdr pair?
+			string/sym	symbol? string? string string-length string-at set-string-at string-copy
+			array		array array? array-length array-at set-array-at int32-at set-int32-at float-at set-float-at
+			conversion	string->symbol symbol->string long->double double->long double->string string->double string->long
+			eval		expand eval apply
+			output		print dump format warn
+			control	exit abort
+			file		open close getc putc read
+			misc		current-environment type-of allocate lop-at set-oop-at verbose optimized
+
+Environment, Namespace, Binding
+	Variable, Env, Context data structures no longer used.
+	The environment is a list of association pairs (car = symname, cdr=value)
+	Namespaces are embedded in the environment, and are marked by having a value that is a pair where the car is a pointer
+	to the (namespace-name, namespace) association pair (i.e., the link before the namespace pointer)
+
+	defines are applied only in the current namespace, and add to the front of the namespace association list
+
+	lets are handled in subr_let (an fsubr) by building up an association list of local bound variables with current env at the end,
+	then evaluating each form of the body using the new local bound env.  When subr_let returns, the old env pointer is used
+	which automatically drops the local binding in use during the let.
+
+	exprs (closures) are handled in apply.  A list of formal/actual associations is built with the saved closure environment at the end,
+	then apply evaluates each form of the body using the new local binding.  When apply returns, the old env pointer is used
+	which automatically drops the local binding in use during the expr.
+
+Reader
+	literals:
+		<long>	12345, ?c	(encode a character as a long)
+		<symbol>	a_symbol, <can_use_special_chars>-*
+		<string>	“a string”, “with \n\t embedded escapes”
+		(<pair>)
+
+	brackets ‘[]’ and braces ‘{}’ are treated like parens for lists, but return a Pair with the specific interned symbol (“bracket” or “brace)
+	along with the read list.  A function for bracket or brace can be written to perform syntactic sugar on the enclosed list.
+
+Expand
+	expands Forms in expressions by calling the Form’s function on the unevaluated arguments.  Also expands Forms matching
+		(set (<symbol> rest)) into (set-<symbol> rest), which also implements the write accessors for structures (they expand
+		the read-accessor into an “oop-at”, then expand the (set (oop-at…)  into (set-oop-at var idx value).  Expand is only called
+		after reading an expression from the REPL (reading a file), just before evaluation when eval is called explicitly in code,
+		or when expand is called explicitly.
+
+Encode
+	deprecated for the most part.  It used to perform symbol->variable encoding and environment creation, but now simply
+	is used during -g to check for use of possibly undefined variables or formal/arg count mismatch
+
+Eval
+	Long, Double, String, Form, Subr, Fixed -> evaluates to self
+	Symbol -> lookup symbol in current environment
+	Pair ->
+		head = eval(head(pair), env)
+		tail = tail(pair)
+		if isFixed(head)
+			apply(function(head), tail, env)
+		else
+			args = evlist(tail, env)
+			apply(head, args, env)
+
+Apply
+	Fixed -> apply (function(fixed), arguments, env)
+	Subr  -> *imp(arguments, env)
+	Expr (closure) ->
+		bind actuals to formals in new context, based upon saved context in closure
+		for each element in body -> ans = eval(element, new-environment)
+		return ans
+	default: lookup up type in applicators array; if found (apply (applicator, args, env))
+
+Applicators
+	the global variable *applicators* is an array of functions, indexed by type, which are the apply functions to use for apply when
+	the form isn’t a Fixed, Subr, or Expr.  Currently used for selectors to do method lookup, and for generics to do multi-method lookup
+	(both defined in eval2.l)
+
+Repl
+	read, expand, eval, print
+
+Command Line options
+	-v	Verbose (multiple occurrences increase verbosity)
+	-b	don’t load boot.l
+	-g	add some debug info to the trace stack entries (printed on fatal error) using encode(), also checks for infinite recursion
+	-O	optimize (use twice to remove trace stack debugging)
+	-p n	profile sample every n uSec (deprecated)
+
+
+
+====== boot2.l ======
+Helper Routines
+	error	- defined in 2 levels so that an error during printing the first error causes abort rather than infinite loop
+	ca*d*r	- various list access functions
+	memq, assq
+	concat-list concat-string, concat-symbol
+	quasiquote
+	define-form, define-macro, define-function, define-constant
+	list-length list-last list->array
+	array-append array-last
+	map1, mapN, map, map-with, with-map, reverse-map, reverse-with-map, reverse-map-with, map*
+	foldr
+	let*	— besides performing a sequential let, let* also allows parallel bindings of lists, e.g.:
+			(let* (((a b c) ‘(1 2 3)))) <body>)
+	cond
+
+map functions
+	map1 : apply a function to a list
+	mapN : apply an N-ary function to a list of N lists, zipping the elements of lists into a list of N-element lists
+	map	: generalize map to either map or mapN, depending upon the number of arguments
+	reverse-map : map1 with reversed list
+	reverse-with-map : apply a 2-ary function to a fixed arg and each element of the list (in reverse)
+	reverse-map-with : apply a 2-ary function to each element of the list (in reverse) and a fixed arg
+	.
+	.
+	map* generalized map of a function on N lists
+
+
+define-macro vs define-form
+	define-macro wraps a dynamic expansion of formals->args in the body of the macro in a define-form.  It can be used
+	to define a simple macro without having to use quasi-quote and unquote (making it look more like a function definition), e.g.
+
+	(define-form (a b c) `(+ ,a (* ,b ,c)))
+	(define-macro (a b c) (+ a * b c)))
+
+	However, define-form is more general, and can evaluate arbitrary expressions during expansion to generate the final result.
+
+
+Types
+	Types (structures) are stored in the %type-names array, with the index of a type’s name being the raw type used by the system
+	new types are allocated with %allocate-type, which appends the new name to the end of the type-names-array and
+	returns its new index.
+
+Structures
+	Structures are the types in the system.  They are represented as a <long> which is the index into the structure info arrays:
+
+		%structure-sizes		(number of fields in the structure)
+		%structure-fields		(list of the field symbols)
+		%structure-bases		(superclass for this class)
+		%structure-derivatives	(array of subclasses for this class)
+
+	The basic object types implemented and used in eval2.c are reflected in the first entries of the structure info arrays (must be initialized
+	in the same order for the reflection to work correctly).
+
+	define-structure name (fields) : defines a new structure with the fields listed, by allocating a new type index and filling in the structure arrays
+	at that index.  Also creates accessor forms for the fields that look like:
+		(define-form <type>-field (self) (oop-at self offset))
+	field names that begin with an underscore are implicitly long values instead of oops, and are fetched in the created accessor
+	with “long-at” instead of “oop-at” [Note, deprecated in eval2…]
+
+	new
+	Structures are created and initialized with “new”, which takes a type and a list of initial values and creates a structure of that type
+	with its fields initialized to the corresponding values (initialized to nil if no corresponding value exists)
+
+	make
+	A structure can be created and initialized with explicit field names using make.  The optional initialization following the structure name
+	are a list of field-name (with colon) and value pairs:
+
+		(define-structure <foo> (a b c))
+		(make <foo> a: 1 b: 2 c: 3)
+		(make <foo> b: 5)
+
+Classes
+	Classes are structures which can inherit fields and methods from a base class (structure)
+
+	define-class <name> <basis> (fields) : create a new structure <name> which has all the fields of <basis> as well as its own fields.
+	methods are inherited from the <basis> class, and can be redefined (“overridden”) in the new class.
+
+Selectors
+	Selectors are a form of generic function; they keep an array of actual functions (indexed on the type of the first argument), and
+	dynamically dispatch based upon that.
+
+	A selector is a structure:	(define-structure <selector> (name methods default))
+	When a selector is applied, the sequence is:
+
+		1) look in the methods array for the selector, indexed by the type of the first parameter
+		2) if none exists, look for an inherited method (using the %structure-bases array)
+		3) if none exists, use the default method of the selector
+
+	selectors are created explicitly with (selector name default), (define-selector name . default), or implicitly when defining a method
+
+Methods
+	methods are functions (bound to a selector), which are created with define-method.  define-method takes the selector, type, 
+	arguments, and raw method body and creates a lambda function with ‘self prepended to args, and the body with all forms of 
+	self.<field> replaced with the equivalent “oop-at” accessors.
+
+Multi-Methods
+	multi-methods are methods that are dynamically dispatched based upon the number and type of all of their arguments.  They are bound to 
+	a <generic> structure, which is like a selector, but for multi-methods.  They generalize the <selector> dispatch method by providing an array
+	for each argument position (nested arrays).  The dispatch arrays are walked, successively using the arguments to the method.  If there is no
+	method that satisfies the arguments, the default method for the <generic> is applied.
+
+List functions
+	push, pop, delete, member? list-reverse! zip zip-assocs
+
+Iteration functions
+	for (<var> <init> <limit> (opt <step>))
+	list-do
+	alist-do
+	lists-do (zips the lists and successively applies the zipped elements to N vars in a body)
+	array-do
+	string-do
+	for-each	: method which invokes the corresponding “do” function based upon the type of the first parameter
+	for-each-with : for-each with a fixed value as a second parameter
+	incr
+	decr
+	until
+	list-detect	: detect first element of list that satisfies the body expression (boolean)
+	array-detect
+	when
+	unless
+	loop (<bindings> <test> . <body>)
+		bindings is a list of (<name> <init-value> <step>) 
+
+conversion
+	string->number-base (str radix)
+	string->number (str)
+	array->list
+	list->string
+	character->string
+	array-append-all (arr str)	: appends each character of the string “str” to the end of the array (dynamically growing it if needed)
+
+sorting and searching
+	array-sort (items . options) : if the first element of options exists, it is the function used to compare the values (default <)
+	string-sort (items . options)
+
+	array-search (arr obj . options) : binary search a sorted list for obj, returning the index of where the obj is (or should be)
+						if the first element of options exists, it is the function used to compare (default -)
+	string-search (str obj . options)
+
+fold operations on lists
+	foldr (op start list)
+	max (a . rest)
+	min (a . rest)
+	sum (a . rest)
+
+structural equality
+	equal (a b) equality for lists
+	string-begins-with (string prefix)
+
+assertions
+	assert (expr) : reports error if expr is false
+
+namespaces
+	new-namespace (name . opts) (opts is optional parent namespace)
+	namespace? (alist)
+	namespace-do (var ns . body) : apply body to each of the bindings in the namespace
+
+load and require
+	the global variable *load-paths* is a list of directory prefixes to search during load and require operation.  The load paths are set from
+	the command line with a -L <path-name> (repeated for each path)
+
+	load performs a read on the specified file name (after finding it using the load-paths)
+	require first looks in the *loaded* global to see if the file has already been loaded.  If not, it is loaded and added to the *loaded* list.
+
+
+==== ir2.k ====
+	<ir> (function scope program functions struct-types error-handler exports)
+		if the <ir> is the representation of an <ir-function>, function holds the <ir-function>
+		scope is a list of <ir-scope>
+		program is an array of insns
+		functions is an array
+		struct-types is an assoc-list of (name . type) pairs
+
+types
+	<ir-type> (name size alignment pointer function) : base class for all the derived ir-types
+			name: symbol, size, alignment: int initialized during creation
+			pointer : cached pointer-type instance to this type
+			function : a trie of cached function types for this return type, indexed by parameter types
+		<ir-label-type>
+		<ir-void type>
+		<ir-scalar-type>
+			<ir-numeric-type>
+				<ir-integral-type>
+				<ir-floating-type>
+			<ir-pointer-type>
+		<ir-varargs-type>
+		<ir-function-type>
+		<ir-struct-type> (members defined)
+	
+	<ir-struct-member>
+
+variables
+	<ir-variable> (name type location)
+		<ir-global>
+		<ir-local>
+		<ir-parameter>
+			<ir-argument>
+	<ir-scope> (parent bindings subscopes) : current scope
+		parent : parent scope (for lexical lookup of nested scopes)
+		bindings : assoc-list of (name . <ir-variable>)
+		subscopes: list of child scopes
+
+	ir-scope-find (scope key)		— find variable for key (name) in this scope’s bindings
+	ir-scope-lookup (scope key)	— look up key in current and parent bindings
+
+errors
+	<ir-error-handler>
+
+insns
+	<ir-insn> (parameters operands type source location)
+		(define-function insn (type . operands) (new type () operands)
+		(define-function leaf (type . parameters) (new type parameters)	— what is a leaf?
+
+	ir-check-type (ir val?)	— this <insn> method is performed on the various <ir-insn> types.  It
+				checks to see if the <insn> is used for value or effect (error if wrong), then checks the <insn>’s 
+				operands and/or parameters for correct types, and optionally modifies the parameters.  Finally,
+				it sets the <insn>’s type field, and returns that as a value.
+
+	— ir: current ir object
+	— val? boolean: 1 = used for value, 0 = used for effect?
+
+		<ir-nop>
+		<ir-lit>
+			<ir-sizeof>
+		<ir-cast>
+		<ir-extern>
+		<ir-function> (scope export calls)
+			— ir-function 
+		<ir-return>
+		<ir-call> (signature), 
+		<ir-member>
+		<ir-set-member>
+		<ir-indir>
+		<ir-set-indir>
+		<ir-get-var>
+		<ir-set-var>
+		<ir-addressof>
+		<ir-define-label> (var)
+		<ir-goto> (var)
+		<ir-let>
+		<ir-define>
+		<ir-while>
+		<ir-if>
+		<ir-logand>
+		<ir-logor>
+		<ir-add>
+		<ir-sub>
+		<ir-neg>
+		<ir-com>
+		<ir-not>
+		<ir-mul>
+		<ir-div>
+		<ir-mod>
+		<ir-bitand>
+		<ir-bitor>
+		<ir-bitxor>
+		<ir-shl>
+		<ir-shr>
+		<ir-eq>
+		<ir-ne>
+		<ir-lt>
+		<ir-le>
+		<ir-ge>
+		<ir-gt>
+
+compilation
+	ir-declare-globals (ir ten) — seems to assume that the <ir>-program in <ir> are all <ir-define> insns, because it uses
+					the with-instance-accessors <ir-define> in the block; need to check if this is true
+
+resource allocation
+	<ir-location> (offset zone base)
+	<ir-zone> (type size all-locations free-locations live-locations)	— one or more contiguous locations sharing a common type
+		
+	<ir-frame> (zones)	— zero or more contiguous zones
+		zones — assoc list of (type . <zone>) pairs
+
+
+==== maru.k ====
+
+
+

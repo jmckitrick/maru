@@ -1,0 +1,31 @@
+(On Linux, type "make".  On Darwin, edit the first line of emit.l to
+set __MACH__ to anything other than () then type "make".  MinGW has
+library issues and doesn't work -- sorry.)
+
+This is a metacircular evaluator for an s-expression language, plus a
+"level shift" from s-expressions down to IA32 machine code to escape
+the infinite metacircular regress.
+
+boot-eval.c contains a reader/evaluator for the s-expression language,
+written in C.  eval.l contains the same evaluator, written in the
+s-expression language.  emit.l contains a compiler from s-expressions
+to IA32 machine code, written in the s-expression language.  boot.l
+contains some data structures and algorithms needed by emit.l, written
+in the s-expression language.
+
+boot-eval.c is compiled and then run on boot.l+emit.l+eval.l to create
+eval.s, a machine code implementation of the s-expression evaluator.
+eval.s is then assembled and linked to make eval, which can be run on
+boot.l+emit.l+eval.l to create eval.s.  The C compiler is then
+entirely out of the loop (unless you lose a working evaluator and need
+to bootstrap again).
+
+The s-expression language has a few interesting characteristics.  You
+can get a feeling for some of them by looking how messaging and
+multimethods are implemented.  The compiler makes some attempt to be
+small and simple (1750 loc for all three ".l" files, including some
+debugging cruft that could be removed) and no attempt whatsoever to
+optimise. Even so, the generated code runs at 40% the speed of
+aggressively-optimised C on my E5430, measured by the convenient macro
+benchmark: dividing the run time of regenerating eval.s via eval by
+that of generating it initially via boot-eval.

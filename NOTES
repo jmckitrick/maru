@@ -1,0 +1,85 @@
+eval.l
+
+- setup GC overhead (define form, define structure)
+- begin compile
+- define externs
+- define initial GC values
+- define memory management functions
+
+boot.l
+
+- list, %print, %dump
+- error, %error logging
+- car and variants
+- assq, concat-list, concat-string, concat-symbol, quasiquote
+- form, function, list-length, list->array, map, map-with, map2-with
+- expanders, encoders, evaluators, applicators
+- %let, let*, %cond, cond
+- type info helpers
+- structures
+- built-in types
+- selectors
+- printers
+- multimethods
+- push/pop
+- for, list-do
+- array->string
+
+emit.l
+
+- string->type-name "<foo>", symbol->type-name, align
+- extern structure, function, and test
+- define-operand-make-setters, define-operand (name, fields, printer) <---
+- define-instruction defines structure, printer, allocator <---
+- define emit multimethod (iterates pairs and emits based on pair type)
+- define-emit-param-name returns "$0", "$1", etc.
+- define-emit-params recurses to build list of types/param names
+- define-emit defines instruction and emit multimethod for type for each arg
+- mangle-label
+- define operands for label, name, value, offset
+- define instructions 
+
+boot-eval.c
+
+GC
+598-628 buffer structure and helpers
+630-636 Object definition and interface impl_takes args and env, returns object *
+638-660 Object type enums and structure
+664-691 Type checking and accessors
+693-698 car/cdr et al. implementations
+704-708 low level allocation
+710-711 initialization of constant symbols (set, quote, lambda, let, quasiquote, unquote, splicing, t, dot
+712-716 other constant symbols for expanders
+718-818 object constructors/accessors
+820-833 intern (looks up symbol, creates if not found)
+835-977 character table and helpers
+981-1009 read list
+1011-1036 hex/octal readers/helpers
+1038-1085 read char (escape codes, decimal/octal/hex, default)
+1087-1194 main reader to return AST?
+1196-1309 writers
+1311-1341 builtins required for expansion (assq, define, apply, concat)
+1343-1385 expand, exlist (not used in eval?)
+1389-1448 encode, enlist (not used in eval?)
+1450-1478 trace, fatal
+1480-1491 eval
+1493- apply
+1509-1533 arity checks (up to 3)
+1535-1642 subr definitions: each defined as subr_FOO(args, env) returning oop (if, and, or, set, let, while, quote, lambda, define)
+1644-1657 define unary arith functions (complement)
+1659-1680 define binary arith functions (+, *, /, %, and, or, xor, shl, shr, -)
+1682-1712 define relational arith functions (<, <=, >, >=)
+1714-1785 define other builtin functions  (=, !=, exit, abort, current env, read, eval_symbol)
+1787-1794 evlist
+1796-2111 more builtins (eval_pair, eval, apply_expr, apply_fixed, apply, type_of, warn, print, dump, form, fixedP, cons, pairP, car, set_car, cdr, set_cdr, formP, symbolP, stringP, string, string_length, string_at, set_string_at, string_symbol, symbol_string, long_string, array, arrayP, array_length, array_at, set_array_at, allocate, oop_at, set_oop_at, not)
+2113-2159 file/path readers
+2161-2164 interrupt,
+2166-2190 main (add roots, intern constant symbols, init globals)
+2192-2195 main (init expanders, encoders, evaluators, applicators)
+2197-2198 main (evaluators start with eval-symbol, eval-pair)
+2200-2201 main (applicators start with apply-fixed, apply-expr)
+2203-2205 main (init trace)
+2207-2209 init arith subr definitions
+2211-2285 intern subr/fixed
+2287-2290 init globals (set, quote, lambda, let)
+2292-2318 repl start/exit

@@ -37,7 +37,14 @@ emit.l
 - define-emit defines instruction and emit multimethod for type for each arg
 - mangle-label
 - define operands for label, name, value, offset
-- define instructions 
+- define instructions via emit (asm output)
+- define compiler global structure
+- define helpers for params, args, temps
+- define generators (emits for higher-level stuff)
+-- symbol, string, temp, nullary, unary, binary, ternary
+-- let, and, or, if, while, set, return, address-of
+- gen definition for long, string, extern, form, expr
+- 
 
 boot-eval.c
 
